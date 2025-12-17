@@ -1,3 +1,15 @@
 __pycache__/
 *.pyc
-.env
+venv/
+
+# model artifacts
+*.pth
+*.pt
+
+# videos
+*.mp4
+*.mov
+*.avi
+
+# temp
+temp_upload.mp4
