@@ -1,111 +1,74 @@
-import os
-import cv2
-import torch
-import numpy as np
-import torch.nn as nn
-from PIL import Image
-from torchvision import models, transforms
+# model.py
 
-# -------------------------
-# Model definition
-# -------------------------
+import torch
+import torch.nn as nn
+from torchvision import models
+
 
 class ResNetTemporalAvg(nn.Module):
+    """
+    Temporal ResNet model.
+    Expects input of shape:
+        (B, T, C, H, W)
+    """
 
-    import os
-    import cv2
-    import torch
-    import numpy as np
-    import torch.nn as nn
-    from PIL import Image
-    from torchvision import models, transforms
+    def __init__(self, num_classes: int = 2):
+        super().__init__()
 
-    # -------------------------
-    # Model definition
-    # -------------------------
+        # Base CNN backbone
+        backbone = models.resnet18(weights=None)
+        self.feature_extractor = nn.Sequential(
+            *list(backbone.children())[:-1]
+        )  # removes final FC layer
 
-    class ResNetTemporalAvg(nn.Module):
-        def __init__(self, num_classes=2):
-            super().__init__()
-            base = models.resnet18(pretrained=False)
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1])
-            self.fc = nn.Linear(512, num_classes)
+        self.fc = nn.Linear(512, num_classes)
 
-        def forward(self, x):
-            # x: (B, T, C, H, W)
-            B, T, C, H, W = x.shape
-            x = x.view(B * T, C, H, W)
-            feats = self.feature_extractor(x).squeeze(-1).squeeze(-1)
-            feats = feats.view(B, T, -1)
-            pooled = feats.mean(dim=1)
-            return self.fc(pooled)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, T, C, H, W)
+        returns: (B, num_classes)
+        """
+        B, T, C, H, W = x.shape
 
-    # -------------------------
-    # Preprocessing
-    # -------------------------
+        # Merge batch and time
+        x = x.view(B * T, C, H, W)
 
-    FRAME_SIZE = (224, 224)
-    NUM_FRAMES = 16
+        feats = self.feature_extractor(x)     # (B*T, 512, 1, 1)
+        feats = feats.squeeze(-1).squeeze(-1) # (B*T, 512)
 
-    transform = transforms.Compose([
-        transforms.Resize(FRAME_SIZE),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        )
-    ])
+        feats = feats.view(B, T, -1)           # (B, T, 512)
+        pooled = feats.mean(dim=1)              # temporal average
 
-    def extract_frames_from_video(path, num_frames=NUM_FRAMES):
-        cap = cv2.VideoCapture(path)
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        if total <= 0:
-            cap.release()
-            raise ValueError("No frames in video")
-
-        indices = np.linspace(0, total - 1, num_frames).astype(int)
-        frames = []
-
-        for idx in indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, frame = cap.read()
-            if not ret:
-                frame = np.zeros((224, 224, 3), dtype=np.uint8)
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame = Image.fromarray(frame)
-            frames.append(transform(frame))
-
-        cap.release()
-        return torch.stack(frames)  # (T, C, H, W)
-
-    # -------------------------
-    # Model loader
-    # -------------------------
-
-    def load_model(weights_path, device="cpu"):
-        model = ResNetTemporalAvg(num_classes=2)
-        model.load_state_dict(torch.load(weights_path, map_location=device))
-        model.to(device)
-        model.eval()
-        return model
-
-    # -------------------------
-    # Inference
-    # -------------------------
-
-    def predict_video(model, video_path, device="cpu"):
-        frames = extract_frames_from_video(video_path)
-        batch = frames.unsqueeze(0).to(device)  # (1, T, C, H, W)
-
-        with torch.no_grad():
-            logits = model(batch)
-            probs = torch.softmax(logits, dim=1)
-            conf, pred = torch.max(probs, dim=1)
-
-        return {
-            "is_make": bool(pred.item() == 1),
-            "confidence": float(conf.item())
-        }
+        return self.fc(pooled)
 
 
+def load_model(
+    weights_path: str | None = None,
+    device: str = "cpu",
+    num_classes: int = 2,
+):
+    """
+    Loads the model and optional weights.
+    """
+    model = ResNetTemporalAvg(num_classes=num_classes).to(device)
+
+    if weights_path is not None:
+        state_dict = torch.load(weights_path, map_location=device)
+        model.load_state_dict(state_dict)
+
+    model.eval()
+    return model
+
+
+@torch.no_grad()
+def predict(
+    model: nn.Module,
+    x: torch.Tensor,
+):
+    """
+    Runs inference.
+
+    x: (B, T, C, H, W)
+    returns: logits (B, num_classes)
+    """
+    return model(x)
