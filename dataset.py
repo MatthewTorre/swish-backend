@@ -58,7 +58,8 @@ class ShotDataset(Dataset):
             if not os.path.isdir(cls_dir):
                 continue
             for fname in os.listdir(cls_dir):
-                if fname.lower().endswith(".mp4"):
+                if fname.lower().endswith((".mp4", ".mov")):
+
                     self.samples.append((os.path.join(cls_dir, fname), label))
 
         if len(self.samples) == 0:
