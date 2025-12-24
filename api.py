@@ -1,46 +1,101 @@
 import os
+import uuid
+import shutil
 import torch
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 
 from model import load_model
 from dataset import extract_frames
 
-app = FastAPI()
+# --------------------------------------------------
+# App setup
+# --------------------------------------------------
+
+app = FastAPI(title="Swish Shot Classification API")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-WEIGHTS_PATH = os.environ.get("WEIGHTS_PATH", "shot_model.pth")
 
+# Path to model weights (env var for flexibility)
+WEIGHTS_PATH = os.environ.get(
+    "WEIGHTS_PATH",
+    "shot_model.pth"   # default for local dev
+)
+
+# Lazy-loaded global model
 _model = None
 
+
 def get_model():
+    """
+    Load the model once and reuse it for all requests.
+    """
     global _model
     if _model is None:
-        _model = load_model(WEIGHTS_PATH, device=DEVICE, num_classes=2)
+        _model = load_model(
+            weights_path=WEIGHTS_PATH,
+            device=DEVICE,
+            num_classes=2
+        )
     return _model
 
 
+# --------------------------------------------------
+# Health check
+# --------------------------------------------------
+
 @app.get("/health")
 def health():
-    return {"ok": True, "device": DEVICE}
+    return {
+        "ok": True,
+        "device": DEVICE,
+        "model_loaded": _model is not None
+    }
 
+
+# --------------------------------------------------
+# Prediction endpoint
+# --------------------------------------------------
 
 @app.post("/predict")
-async def predict_endpoint(file: UploadFile = File(...)):
-    # Save upload to temp file (simple + reliable)
-    temp_path = "temp_upload.mp4"
-    data = await file.read()
-    with open(temp_path, "wb") as f:
-        f.write(data)
+async def predict(file: UploadFile = File(...)):
+    """
+    Accepts a video file (.mp4, .mov),
+    runs shot classification,
+    returns prediction + confidence.
+    """
 
-    frames = extract_frames(temp_path).unsqueeze(0).to(DEVICE)  # (1, T, C, H, W)
-    model = get_model()
+    # Basic validation
+    if not file.content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be a video")
 
-    with torch.no_grad():
-        logits = model(frames)
-        probs = torch.softmax(logits, dim=1)
-        conf, pred = torch.max(probs, dim=1)
+    # Create temp file
+    temp_filename = f"/tmp/{uuid.uuid4()}.mp4"
 
-    return {
-        "is_make": bool(pred.item() == 1),
-        "confidence": float(conf.item()),
-    }
+    try:
+        # Save uploaded video
+        with open(temp_filename, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Extract frames
+        frames = extract_frames(temp_filename)  # (T, C, H, W)
+        frames = frames.unsqueeze(0).to(DEVICE) # (1, T, C, H, W)
+
+        # Run inference
+        model = get_model()
+        with torch.no_grad():
+            logits = model(frames)
+            probs = torch.softmax(logits, dim=1)
+            conf, pred = torch.max(probs, dim=1)
+
+        return {
+            "is_make": bool(pred.item() == 1),
+            "confidence": float(conf.item())
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        # Cleanup temp file
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
